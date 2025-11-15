@@ -51,10 +51,10 @@ Be balanced and adaptable. Focus on race pace while managing resources effective
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'gpt-4',
+        model: 'gpt-5.1',
         messages: [{ role: 'user', content: prompt }],
         temperature: 0.7,
-        max_tokens: 500,
+        max_completion_tokens: 500,
       }),
     });
 
@@ -114,7 +114,7 @@ Generate your racing strategy as a JSON object with these exact fields:
 Be aggressive and opportunistic. Focus on overtaking and speed while managing resources efficiently. Return ONLY the JSON object, no explanations.`;
 
   try {
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`, {
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
