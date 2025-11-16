@@ -247,13 +247,24 @@ export abstract class StrategyEngine {
 // Rule-based strategy implementation
 export class RuleBasedStrategyEngine extends StrategyEngine {
   public async makeDecision(context: StrategyContext): Promise<StrategyDecision> {
-    const { vehicle, surroundings, currentSegment, weather, currentLap, totalLaps } = context;
+    const { vehicle, surroundings, currentSegment, weather, currentLap, totalLaps, hazards } = context;
     
     // Calculate risk tolerance
     const riskTolerance = this.calculateRiskTolerance(vehicle, weather);
     
     // Calculate optimal speed for current conditions
-    const targetSpeed = this.calculateOptimalSpeed(currentSegment, vehicle, weather);
+    let targetSpeed = this.calculateOptimalSpeed(currentSegment, vehicle, weather);
+    
+    // Adjust for dynamic hazards
+    for (const hazard of hazards) {
+      if (hazard.type === 'debris') {
+        targetSpeed *= 0.7; // Slow down significantly for debris
+      } else if (hazard.type === 'oil_spill') {
+        targetSpeed *= 0.5; // Very slow for oil spills
+      } else if (hazard.type === 'retired_car') {
+        targetSpeed *= 0.6; // Slow for retired cars
+      }
+    }
     
     // Calculate throttle and braking
     let throttle = 0;
@@ -306,6 +317,9 @@ export class RuleBasedStrategyEngine extends StrategyEngine {
 export class LLMStrategyEngine extends StrategyEngine {
   private apiEndpoint: string;
   private modelType: string;
+  private lastCallTime: number = 0;
+  private minCallInterval: number = 1000; // Minimum 1 second between calls
+  private pendingCall: Promise<StrategyDecision> | null = null;
 
   constructor(apiEndpoint: string, modelType: string) {
     super();
@@ -314,6 +328,32 @@ export class LLMStrategyEngine extends StrategyEngine {
   }
 
   public async makeDecision(context: StrategyContext): Promise<StrategyDecision> {
+    // Rate limiting - if there's a pending call, return it
+    if (this.pendingCall) {
+      return this.pendingCall;
+    }
+    
+    // Check minimum interval between calls
+    const now = Date.now();
+    if (now - this.lastCallTime < this.minCallInterval) {
+      // Too soon, use fallback strategy
+      const fallbackEngine = new RuleBasedStrategyEngine();
+      return fallbackEngine.makeDecision(context);
+    }
+    
+    // Create the API call promise
+    this.pendingCall = this.callLLMAPI(context);
+    
+    try {
+      const result = await this.pendingCall;
+      this.lastCallTime = Date.now();
+      return result;
+    } finally {
+      this.pendingCall = null;
+    }
+  }
+  
+  private async callLLMAPI(context: StrategyContext): Promise<StrategyDecision> {
     try {
       // Prepare context data for LLM
       const contextData = {

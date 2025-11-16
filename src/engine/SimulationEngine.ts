@@ -238,6 +238,22 @@ export class SimulationEngine {
     // Calculate surroundings
     const surroundings = this.calculateSurroundings(vehicle);
     
+    // Get obstacles from nearby segments
+    const hazards: Array<{type: string, segmentId: number, distance: number}> = [];
+    for (let i = 0; i < this.track.length; i++) {
+      const segment = this.track[i];
+      if ((segment as any).obstacle) {
+        const distance = Math.abs(i - vehicle.currentSegment);
+        if (distance <= 3) { // Only consider nearby obstacles
+          hazards.push({
+            type: (segment as any).obstacle,
+            segmentId: i,
+            distance
+          });
+        }
+      }
+    }
+    
     // Get strategy decision from agent
     const strategyEngine = this.getStrategyEngine(vehicle);
     const context: StrategyContext = {
@@ -248,25 +264,78 @@ export class SimulationEngine {
       weather: this.weather,
       battery: vehicle.energyModel.currentLevel,
       tireWear: vehicle.tireWear,
-      hazards: [],
+      hazards,
       currentLap: this.currentLap,
       totalLaps: this.config.totalLaps
     };
     
     const decision = await strategyEngine.makeDecision(context);
     
-    // Apply physics
+    // Log AI decision for debugging
+    if (vehicle.agentId) {
+      // Calculate target speed for logging (same logic as in StrategyEngine)
+      let targetSpeed = vehicle.maxSpeed;
+      
+      // Adjust for segment type
+      switch (segment.type) {
+        case 'corner':
+          if (segment.radius) {
+            const maxLateralG = (segment.grip || 1.2) * 9.81 * (1 - vehicle.tireWear * 0.3);
+            const cornerSpeed = Math.sqrt(maxLateralG * segment.radius) * 3.6;
+            targetSpeed = Math.min(targetSpeed, cornerSpeed);
+          }
+          break;
+        case 'hairpin':
+          targetSpeed = Math.min(targetSpeed, 80);
+          break;
+        case 'chicane':
+          targetSpeed = Math.min(targetSpeed, vehicle.maxSpeed * 0.7);
+          break;
+      }
+      
+      // Adjust for hazards
+      for (const hazard of hazards) {
+        if (hazard.type === 'debris') {
+          targetSpeed *= 0.7;
+        } else if (hazard.type === 'oil_spill') {
+          targetSpeed *= 0.5;
+        } else if (hazard.type === 'retired_car') {
+          targetSpeed *= 0.6;
+        }
+      }
+      
+      console.log(`AI Agent ${vehicle.agentId} decision:`, {
+        targetSpeed: targetSpeed.toFixed(2),
+        throttle: decision.throttle.toFixed(3),
+        braking: decision.braking.toFixed(3),
+        steering: decision.steering.toFixed(3),
+        riskLevel: decision.riskLevel.toFixed(3),
+        drsActivation: decision.drsActivation,
+        overtakingDecision: decision.overtakingDecision,
+        pitDecision: decision.pitDecision,
+        energyManagement: decision.energyManagement,
+        hazardsDetected: hazards.length,
+        currentSpeed: vehicle.speed.toFixed(2),
+        currentSegment: vehicle.currentSegment,
+        segmentType: segment.type
+      });
+    }
+    
+    // Apply strategy decisions first
+    this.applyStrategyDecisions(vehicle, decision);
+    
+    // Apply physics with AI-modified parameters
     const physicsResult = PhysicsEngine.applyPhysics(vehicle, segment, this.weather, deltaTime);
     
     // Update vehicle state
     vehicle.speed = physicsResult.speed;
-    vehicle.acceleration = physicsResult.acceleration;
+    // Keep AI's acceleration if it was set, otherwise use physics
+    if (vehicle.acceleration === 0) {
+      vehicle.acceleration = physicsResult.acceleration;
+    }
     
     // Update position and segment progress
     this.updateVehiclePosition(vehicle, deltaTime);
-    
-    // Apply strategy decisions
-    this.applyStrategyDecisions(vehicle, decision);
     
     // Handle pit stops
     if (decision.pitDecision === 'immediate' && this.canEnterPit(vehicle)) {
@@ -278,6 +347,21 @@ export class SimulationEngine {
   private updateVehiclePosition(vehicle: VehicleModel, deltaTime: number): void {
     const segment = this.track[vehicle.currentSegment];
     if (!segment) return;
+    
+    // Check for obstacle collision in current segment
+    if ((segment as any).obstacle) {
+      console.log(`💥 Vehicle ${vehicle.id} HIT ${(segment as any).obstacle} obstacle on segment ${vehicle.currentSegment}`);
+      // Reduce speed significantly when hitting obstacle
+      vehicle.speed *= 0.3;
+      vehicle.tireWear += 0.05; // Increase tire wear
+      // Mark obstacle as hit for visualization
+      (vehicle as any).obstacleHit = true;
+      // Clear obstacle after collision (simplified)
+      delete (segment as any).obstacle;
+    } else {
+      // Clear obstacle hit flag if no obstacle
+      (vehicle as any).obstacleHit = false;
+    }
     
     // Calculate distance traveled
     const distanceTraveled = vehicle.speed * (deltaTime / 3.6); // Convert km/h to m/s
@@ -402,16 +486,34 @@ export class SimulationEngine {
 
   // Apply strategy decisions to vehicle
   private applyStrategyDecisions(vehicle: VehicleModel, decision: StrategyDecision): void {
-    // Strategy decisions are already applied through physics calculations
-    // This method can handle additional logic like DRS activation, etc.
+    // Apply throttle and braking decisions
+    if (decision.throttle > 0) {
+      // Increase acceleration based on throttle
+      vehicle.acceleration = decision.throttle * 15; // Max acceleration 15 m/s²
+    }
+    
+    if (decision.braking > 0) {
+      // Apply braking force
+      vehicle.speed *= (1 - decision.braking * 0.1); // Reduce speed by up to 10%
+    }
+    
+    // Apply steering decisions (affects cornering speed)
+    if (decision.steering !== 0) {
+      // Steering affects max cornering speed
+      const steeringEffect = Math.abs(decision.steering) * 0.2; // Up to 20% speed reduction
+      vehicle.speed *= (1 - steeringEffect);
+    }
     
     // Handle DRS activation
     if (decision.drsActivation) {
-      // Apply DRS boost (handled in physics engine)
+      // Apply DRS boost (temporary speed increase)
+      vehicle.speed *= 1.1; // 10% speed boost
     }
     
     // Handle overtaking attempts
     if (decision.overtakingDecision === 'attempt') {
+      // Boost speed for overtaking
+      vehicle.speed *= 1.05; // 5% speed boost
       this.eventManager.emitOvertakeAttempt(vehicle.id, this.getVehicleAhead(vehicle)?.id || 0);
     }
   }
@@ -503,6 +605,15 @@ export class SimulationEngine {
       }
     });
     
+    // Obstacle appear events
+    if (Math.random() < this.config.eventProbabilities.obstacleAppear * this.config.fixedTimestep / 60) {
+      const segmentId = Math.floor(Math.random() * this.track.length);
+      const obstacleTypes = ['debris', 'oil_spill', 'retired_car'];
+      const obstacleType = obstacleTypes[Math.floor(Math.random() * obstacleTypes.length)];
+      console.log(`🚧 OBSTACLE GENERATED: ${obstacleType} on segment ${segmentId}`);
+      this.eventManager.emitObstacleAppear(segmentId, obstacleType);
+    }
+    
     // Collision events
     for (let i = 0; i < this.vehicles.length; i++) {
       for (let j = i + 1; j < this.vehicles.length; j++) {
@@ -545,6 +656,15 @@ export class SimulationEngine {
       if (vehicle) {
         vehicle.speed *= (1 - event.data.severity * 0.3); // Reduce speed
         vehicle.tireWear += event.data.severity * 0.1; // Increase tire wear
+      }
+    });
+    
+    this.eventManager.subscribe(EventType.OBSTACLE_APPEAR, (event) => {
+      // Store obstacles in track segments for collision detection
+      const segment = this.track[event.data.segmentId];
+      if (segment) {
+        // Add obstacle to segment (simplified - in real implementation would need proper obstacle tracking)
+        (segment as any).obstacle = event.data.obstacleType;
       }
     });
     

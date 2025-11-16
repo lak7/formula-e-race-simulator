@@ -250,12 +250,25 @@ export class PhysicsEngine {
     
     let acceleration: number;
     
-    if (speedDiff > 0) {
-      // Accelerating
-      acceleration = Math.min(speedDiff / deltaTime, maxAcceleration);
+    // Use AI-set acceleration if available, otherwise calculate
+    if (vehicle.acceleration !== 0) {
+      // AI has set an acceleration value
+      acceleration = vehicle.acceleration;
+      // Clamp to physics limits
+      if (acceleration > 0) {
+        acceleration = Math.min(acceleration, maxAcceleration);
+      } else {
+        acceleration = Math.max(acceleration, -maxDeceleration);
+      }
     } else {
-      // Braking
-      acceleration = Math.max(speedDiff / deltaTime, -maxDeceleration);
+      // No AI acceleration, calculate based on target speed
+      if (speedDiff > 0) {
+        // Accelerating
+        acceleration = Math.min(speedDiff / deltaTime, maxAcceleration);
+      } else {
+        // Braking
+        acceleration = Math.max(speedDiff / deltaTime, -maxDeceleration);
+      }
     }
     
     // Apply drag force effect on acceleration
